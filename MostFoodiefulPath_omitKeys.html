@@ -1,0 +1,500 @@
+<head>
+    <script type="text/javascript" src="http://oauth.googlecode.com/svn/code/javascript/sha1.js"></script>
+    <script type="text/javascript" src="http://oauth.googlecode.com/svn/code/javascript/oauth.js"></script>
+    <script src="https://maps.googleapis.com/maps/api/js?signed_in=true&libraries=places,geometry&sensor=false&callback=initMap"
+            async defer></script>
+    <!--Style copied from google maps example -->
+    <style>
+        html, body {
+            height: 85%;
+            margin: 0;
+            padding: 0;
+        }
+        #map {
+            height: 100%;
+        }
+        .controls {
+            margin-top: 10px;
+            border: 1px solid transparent;
+            border-radius: 2px 0 0 2px;
+            box-sizing: border-box;
+            -moz-box-sizing: border-box;
+            height: 32px;
+            outline: none;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+        }
+
+        #pac-input {
+            background-color: #fff;
+            font-family: Roboto;
+            font-size: 15px;
+            font-weight: 300;
+            margin-left: 12px;
+            padding: 0 11px 0 13px;
+            text-overflow: ellipsis;
+            width: 300px;
+        }
+
+        #pac-input:focus {
+            border-color: #4d90fe;
+        }
+
+        .pac-container {
+            font-family: Roboto;
+        }
+
+        #type-selector {
+            color: #fff;
+            background-color: #4d90fe;
+            padding: 5px 11px 0px 11px;
+        }
+
+        #type-selector label {
+            font-family: Roboto;
+            font-size: 13px;
+            font-weight: 300;
+        }
+
+    </style>
+    <script>
+    // Most Foodie-ful Path
+    // Final project for Algorithms and Data, Summer II 2015
+
+    // Constants and global variables
+    var MAX_NODES = 8; // max waypoints for the map, not including start and end
+    var MAX_INPUT_NODES = 10; // max total nodes for distance matrix is 100
+    var searchTerm = "food";
+
+    // map stuff!
+    var map;
+    var searchBox1;
+    var searchBox2;
+    var start;
+    var end;
+    var directionsService;
+    var directionsDisplay;
+
+    // TO RUN CODE, OBTAIN AND USE YOUR OWN YELP API CREDENTIALS
+    // Also: if running locally from the html file, you may need a browser extension to allow cross-site requests.
+    // browser extension: https://chrome.google.com/webstore/detail/allow-control-allow-origi/nlfbmbojpeacfghkpbjhddihlkkiljbi?hl=en-US
+    var YELP_KEY = "";
+    var YELP_KEY_SECRET = "";
+    var YELP_TOKEN = "";
+    var YELP_TOKEN_SECRET = "";
+    var OAUTH_SIGNATURE_METHOD ="HMAC-SHA1";
+    
+    
+    ///////////// STRUCTURES /////////////////////////
+
+
+    // graph represented as an adjacency matrix
+    // adjacency is indicated by the edge distance
+    // if no adjacency, entry is null
+    // for this application, all nodes are adjacent
+    // nodeList is an array of yelp Business
+    // ******* except start and end which are coordinate pairs
+    // (i know this is bad practice but it is the easiest solution here)
+    // index in nodeList corresponds with index in matrix
+    // the adjacency matrix is constructed within a google maps callback, which provides the distances
+    function Graph(nodeList, matrix) {
+        this.nodes = nodeList;
+        this.matrix = matrix;
+        return this;
+    }
+    
+    // return list of nodes for the graph
+    // start and end must be initialized beforehand
+    function getLocations() {
+        var restaurants = getYelpResults();
+        var locations = trimYelpResults(restaurants);
+        console.log(locations);
+        locations.push(getLatLng(end));
+        locations.unshift(getLatLng(start));
+        return locations;
+    }
+    // due to limit on google distance matrix, we can only have 10 total points (8 restaurants)
+    // we decided to keep the highest-rated ones
+    function trimYelpResults(restaurants) {
+        // already sorted by rating
+//        var sorted = restaurants.sort(function(a, b) {
+//            return a.rating - b.rating;
+//        });
+//        return sorted.slice(0, MAX_INPUT_NODES - 2);
+        return restaurants.slice(0, MAX_INPUT_NODES - 2);
+    }
+
+    // use for start, end
+    function getLatLng(point) {
+        return {lat: point.geometry.location.G, lng: point.geometry.location.K};
+    }
+
+    // helper object for algorithm
+    function Path() {
+        this.nodes = [];
+        this.totalDistance = 0;
+        this.totalStars = 0;
+        return this;
+    }
+
+    // return a copy of the object
+    // recursive cloning
+    function clone(obj) {
+        return JSON.parse(JSON.stringify(obj));
+    }
+
+    ///////////// LOGIC ///////////////////////////
+
+    // return the most-weight path
+    // essentially a modified bellman-ford
+    // the weight/score of a path is the sum of restaurant stars over total distance
+    // assumes all nodes are connected to all other nodes
+    function bestPath(graph) {
+        // the best path to each node so far (index corresponds to node in graph.nodes)
+        var paths = [];
+
+        // best path to start will always be start (no edges)
+        paths[0] = new Path();
+        paths[0].nodes.push(graph.nodes[0]);
+        // start by accumulating an initial path with 1 step
+        for (var n = 1; n < graph.nodes.length; n++) {
+            var path = new Path();
+            path.nodes.push(graph.nodes[0]);
+            path.nodes.push(graph.nodes[n]);
+            path.totalDistance = graph.matrix[0][n];
+            if (n !== graph.nodes.length - 1) {
+                path.totalStars = graph.nodes[n].rating;
+            }
+            paths[n] = path;
+        }
+
+        // for each node (not including start) is (path to some adjacent node + additional distance to this node)
+        // better than the path to this node in the previous iteration? if so, update in paths
+        // NOTE: terminates once the max number of steps is reached, a better path may be possible if more nodes are used
+        // however, google distance matrix has a 100-element limit, so we can only have a 10x10 matrix (8 restaurants)
+        var steps = 2;
+        // while loop for the iterations
+        while (steps < graph.nodes.length && steps <= MAX_NODES + 1) {
+            var previousPaths = clone(paths); // copy paths
+            // for each node within the iteration, find new best path to that node
+            for (var i = 1; i < graph.nodes.length; i++) {
+                var me = graph.nodes[i];
+                var myStars = (i === graph.nodes.length - 1) ? 0 : me.rating;
+                for (var p = 0; p < previousPaths.length; p++) {
+                    var newPath = clone(previousPaths[p]);
+                    if (!(p == i || contains(newPath.nodes, me))) {
+                        newPath.nodes.push(me);
+                        newPath.totalDistance += graph.matrix[p][i];
+                        newPath.totalStars += myStars;
+                        if (ratio(newPath) > ratio(paths[i])) {
+                            paths[i] = newPath;
+                        }
+                    }
+                }
+            }
+            steps++;
+        }
+        return paths.pop(); // at this point, the path to the last node should be the optimal one
+    }
+
+    // returns the ratio of stars/distance in a path
+    function ratio(path) {
+        return path.totalStars / path.totalDistance;
+    }
+
+    // used to find a midpoint as a seed location for yelp search
+    // haversine formula (accounts for earth's curve)
+    // code from here: http://www.movable-type.co.uk/scripts/latlong.html (syntax modified slightly, same logic)
+    // google api has a nice function for distance between 2 points, but we couldn't get it working for some reason
+    function getDirectDistance(point1, point2) {
+        var lat1 = point1.lat;
+        var lat2 = point2.lat;
+        var lon1 = point1.lng;
+        var lon2 = point2.lng;
+        var R = 6371000; // metres
+        var phi1 = toRadians(lat1);
+        var phi2 = toRadians(lat2);
+        var deltaPhi = toRadians(lat2-lat1);
+        var deltaLambda = toRadians(lon2-lon1);
+
+        var a = Math.sin(deltaPhi/2) * Math.sin(deltaPhi/2) +
+                Math.cos(phi1) * Math.cos(phi2) *
+                Math.sin(deltaLambda/2) * Math.sin(deltaLambda/2);
+        var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+
+        var d = R * c;
+        return d;
+
+        //google.maps.geometry.spherical.computeDistanceBetween(point1, point2);
+    }
+    function toRadians(num) {
+        return num * Math.PI / 180;
+    }
+
+    function contains(arr, obj) {
+        for (var i = 0; i < arr.length; i++) {
+            if (equals(arr[i], obj)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    function equals(obj1, obj2) {
+        return JSON.stringify(obj1) == JSON.stringify(obj2);
+    }
+    
+    //////////// EXTERNAL API, DISPLAY ////////////////////////
+
+    function main() {
+        print("");
+        buildGraphAndCalculate();
+    }
+    // MAIN FUNCTION
+    // use google to get distances between locations and build adjacency matrix
+    // pass locations and matrix to graph constructor
+    // pass graph to algorithm
+    // display results on map
+    function buildGraphAndCalculate() {
+        if (start == null || start == undefined || end == null || end == undefined) {
+            print("Must pick a start and end point");
+            return;
+        }
+        var locations = getLocations();
+
+        // distance matrix takes coordinates OR an address
+        // yelp only returns addresses, so we'll use those for the businesses
+        // start and end are already coordinates so we don't need to do anything with those
+        var rawLocations = [];
+        rawLocations[0] = locations[0];
+        for (var i = 1; i < locations.length - 1; i++) {
+            rawLocations[i] = getAddress(locations[i]);
+        }
+        rawLocations[locations.length - 1] = locations[locations.length - 1];
+
+        // gearing up for the callback...
+        var distanceMatrix  = new google.maps.DistanceMatrixService();
+        var distanceRequest = { origins: rawLocations, destinations: rawLocations, travelMode: google.maps.TravelMode.WALKING }
+        // ...and here it is!
+        distanceMatrix.getDistanceMatrix(distanceRequest, function(response, status) {
+            if (status == google.maps.DistanceMatrixStatus.OK) {
+                // extract distances from response into matrix
+                var matrix = [];
+                for (var r = 0; r < response.rows.length; r++) {
+                    matrix[r] = [];
+                    var elements = response.rows[r].elements;
+                    for (var c = 0; c < elements.length; c++) {
+                        if (r === c) {
+                            matrix[r][c] = 0;
+                        }
+                        else if (matrix[c] !== null && matrix[c] !== undefined) {
+                            matrix[r][c] = matrix[c][r];
+                        }
+                        else {
+                            matrix[r][c] = elements[c].distance.value;
+                        }
+                    }
+                }
+                var graph = new Graph(locations, matrix);
+                var path = bestPath(graph);
+                displayPathOnMap(path);
+            }
+            else {
+                print("error: " + status);
+            }
+        });
+    }
+    
+    // make http request to yelp for food in area
+    // sort param is for sort by rating (yelp cant return every result, so i want the best)
+    function getYelpResults() {
+        var point1 = getLatLng(start);
+        var point2 = getLatLng(end);
+        var lat = (point1.lat + point2.lat) / 2;
+        var lng = (point1.lng + point2.lng) / 2;
+        //var latlng = google.maps.geometry.spherical.interpolate(point1, point2, .5);
+        var radius = getDirectDistance(point1, point2) / 1.75; // radius a little over half the distance
+
+        var url = "http://api.yelp.com/v2/search";
+        var params = "term=" + searchTerm + "&ll=" + lat + "," + lng + "&radius_filter=" + radius + "&sort=2";
+
+        var results = JSON.parse(sendRequest(signAndGetUrl("GET", url, params)));
+        var businesses = [];
+        for (var i = 0; i < results.businesses.length; i++) {
+            var business = results.businesses[i];
+            if (!business.is_closed) {
+                businesses.push(business);
+            }
+        }
+        return businesses;
+    }
+    
+    // extract address from yelp business
+    function getAddress(business) {
+        var addressString = "";
+        for (var i = 0; i < business.location.address.length; i++) {
+            addressString += business.location.address[i] + " ";
+        }
+        addressString += business.location.city + ", ";
+        addressString += business.location.state_code + " ";
+        addressString += business.location.postal_code + " ";
+        addressString += business.location.country_code;
+        return addressString;
+    }
+
+    // send a request, return response TEXT
+    function sendRequest(url) {
+        var xmlHttpReq = new XMLHttpRequest();
+        xmlHttpReq.open("GET", url, false);
+        xmlHttpReq.send(null);
+        return xmlHttpReq.responseText;
+    }
+
+
+    // on load
+    function onLoad() {
+        document.getElementById("searchTerm").onkeydown = function(event) {
+            if(event.keyCode == 13){
+                updateSearchTerm();
+            }
+        }
+
+        initMap();
+    }
+
+    // update display with new search term
+    function updateSearchTerm() {
+        var searchTermLabel = document.getElementById("searchTermLabel");
+        var searchTermInput = document.getElementById("searchTerm");
+
+        searchTerm = searchTermInput.value;
+        searchTermLabel.innerHTML = "Searching for: " + searchTerm +
+                ". Not looking for " + searchTerm + "? Enter custom search term here!";
+        searchTermInput.value = "";
+    }
+
+    // display path on map
+    function displayPathOnMap(path) {
+        var origin = path.nodes.shift();
+        var dest = path.nodes.pop();
+        var waypoints = [];
+        for (var i = 0; i < path.nodes.length; i++) {
+            var waypoint = {location: getAddress(path.nodes[i])};
+            waypoints.push(waypoint);
+        }
+        var request = {
+            origin: origin,
+            destination: dest,
+            travelMode: google.maps.TravelMode.WALKING,
+            waypoints: waypoints
+        };
+        displayRestaurantNames(path);
+        directionsService.route(request, function(result, status) {
+            directionsDisplay.setDirections(result);
+        });
+    }
+
+    function displayRestaurantNames(path) {
+        var nodes = path.nodes;
+        var result = "";
+        for (var i = 0; i< nodes.length; i++) {
+            result += nodes[i].name;
+            if (i !== nodes.length - 1) {
+                result += ", ";
+            }
+        }
+        result += ". Total distance: " + path.totalDistance + " meters. Stars: " + path.totalStars + ". Stars/meter: " + ratio(path);
+        print(result);
+    }
+
+    function print(text) {
+        document.getElementById("print").innerHTML = text;
+    }
+
+    // STUFF COPIED FROM GOOGLE
+    // (some is modified for our application)
+
+    function initMap() {
+        directionsService = new google.maps.DirectionsService;
+        directionsDisplay = new google.maps.DirectionsRenderer;
+        map = new google.maps.Map(document.getElementById('map'), {
+            zoom: 6,
+            center: {lat: 41.85, lng: -87.65},
+            mapTypeId: google.maps.MapTypeId.ROADMAP
+        });
+        directionsDisplay.setMap(map);
+
+        // Create the search box and link it to the UI element.
+        var input1 = document.getElementById('pac-input1');
+        var input2 = document.getElementById('pac-input2');
+        searchBox1 = new google.maps.places.SearchBox(input1);
+        searchBox2 = new google.maps.places.SearchBox(input2);
+
+        // Bias the SearchBox results towards current map's viewport.
+        map.addListener('bounds_changed', function() {
+            searchBox1.setBounds(map.getBounds());
+        });
+        map.addListener('bounds_changed', function() {
+            searchBox2.setBounds(map.getBounds());
+        });
+
+
+        // [START region_getplaces]
+        // Listen for the event fired when the user selects a prediction and retrieve
+        // more details for that place.
+        searchBox1.addListener('places_changed', function() {
+            var places = searchBox1.getPlaces();
+
+            if (places.length == 0) {
+                return;
+            }
+            start = places[0];
+        });
+        searchBox2.addListener('places_changed', function() {
+            var places = searchBox2.getPlaces();
+
+            if (places.length == 0) {
+                return;
+            }
+            end = places[0];
+        });
+
+    }
+
+    ///// oauth stuff
+    //// copied from here view-source:http://oauth.googlecode.com/svn/code/javascript/example/signature.html
+    /// and modified
+
+    function signAndGetUrl(method, url, parameters) {
+        var accessor = {consumerSecret: YELP_KEY_SECRET, tokenSecret: YELP_TOKEN_SECRET};
+        var message = {method: method, action: url, parameters: OAuth.decodeForm(parameters)};
+        message.parameters.push(["oauth_consumer_key", YELP_KEY]);
+        message.parameters.push(["oauth_token", YELP_TOKEN]);
+        message.parameters.push(["oauth_signature_method", OAUTH_SIGNATURE_METHOD]);
+        message.parameters.push(["oauth_version", "1.0"]);
+        OAuth.completeRequest(message, accessor);
+        OAuth.SignatureMethod.sign(message, accessor);
+        return url + '?' + OAuth.formEncode(message.parameters);
+    }
+
+
+    </script>
+</head>
+<body onload="onLoad()">
+    <div style="padding:0px 0px 0px 10px">
+        <h3>
+            Most Foodiful Path: For when you're going from one place to another, and you want to stop at the best places along the way.
+        </h3>
+        <div>
+            <p id="searchTermLabel">Searching for: food. Not looking for food? Enter custom search term here!</p>
+            <input type="text" placeholder="search for..." name="searchTerm" id="searchTerm" />
+            <button name="submitButton" id="submitButton" onclick="updateSearchTerm()">Update Search</button>
+        </div>
+        <br />
+        <div>
+            <button id="mainButton" onclick="main()">Display results!</button>
+            <p id="print"></p>
+        </div>
+        <input id="pac-input1" class="controls" type="text" placeholder="Start"/>
+        <input id="pac-input2" class="controls" type="text" placeholder="End"/>
+        <div id="map" style="float:left;width:70%;height:100%;"></div>
+    </div>
+</body>
